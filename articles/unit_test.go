@@ -214,35 +214,35 @@ func TestFindManyArticle(t *testing.T) {
 	asserts.NotNil(articles, "Articles should not be nil")
 
 	// Test with invalid limit/offset
-	articles, count, err = FindManyArticle("", "", "invalid", "invalid", "")
+	_, _, err = FindManyArticle("", "", "invalid", "invalid", "")
 	asserts.NoError(err, "FindManyArticle with invalid params should succeed")
 
 	// Test filter by tag
-	articles, count, err = FindManyArticle("findmanytag", "", "10", "0", "")
+	_, count, err = FindManyArticle("findmanytag", "", "10", "0", "")
 	asserts.NoError(err, "FindManyArticle by tag should succeed")
 	asserts.GreaterOrEqual(count, 1, "Count should be at least 1 for tag filter")
 
 	// Test filter by non-existent tag
-	articles, count, err = FindManyArticle("nonexistenttag", "", "10", "0", "")
+	_, count, err = FindManyArticle("nonexistenttag", "", "10", "0", "")
 	asserts.NoError(err, "FindManyArticle by non-existent tag should succeed")
 	asserts.Equal(0, count, "Count should be 0 for non-existent tag")
 
 	// Test filter by author
-	articles, count, err = FindManyArticle("", userModel.Username, "10", "0", "")
+	_, count, err = FindManyArticle("", userModel.Username, "10", "0", "")
 	asserts.NoError(err, "FindManyArticle by author should succeed")
 	asserts.GreaterOrEqual(count, 1, "Count should be at least 1 for author filter")
 
 	// Test filter by non-existent author
-	articles, count, err = FindManyArticle("", "nonexistentauthor", "10", "0", "")
+	_, _, err = FindManyArticle("", "nonexistentauthor", "10", "0", "")
 	asserts.NoError(err, "FindManyArticle by non-existent author should succeed")
 
 	// Test filter by favorited
-	articles, count, err = FindManyArticle("", "", "10", "0", userModel.Username)
+	_, count, err = FindManyArticle("", "", "10", "0", userModel.Username)
 	asserts.NoError(err, "FindManyArticle by favorited should succeed")
 	asserts.GreaterOrEqual(count, 1, "Count should be at least 1 for favorited filter")
 
 	// Test filter by non-existent favorited user
-	articles, count, err = FindManyArticle("", "", "10", "0", "nonexistentuser")
+	_, _, err = FindManyArticle("", "", "10", "0", "nonexistentuser")
 	asserts.NoError(err, "FindManyArticle by non-existent favorited should succeed")
 }
 
@@ -1321,6 +1321,186 @@ func TestFavoritesCountWithMultipleUsers(t *testing.T) {
 
 	count := article.favoritesCount()
 	asserts.Equal(uint(2), count, "Favorites count should be 2")
+}
+
+func TestBatchGetFavoriteStatusEdgeCases(t *testing.T) {
+	asserts := assert.New(t)
+
+	user := createTestUser()
+	articleUserModel := GetArticleUserModel(user)
+
+	// Test with empty article IDs
+	statusMap := BatchGetFavoriteStatus([]uint{}, articleUserModel.ID)
+	asserts.Equal(0, len(statusMap), "Empty article IDs should return empty map")
+
+	// Test with zero user ID
+	article := ArticleModel{
+		Slug:        fmt.Sprintf("batch-status-article-%d", common.RandInt()),
+		Title:       "Batch Status Test",
+		Description: "Test Description",
+		Body:        "Test Body",
+		Author:      articleUserModel,
+		AuthorID:    articleUserModel.ID,
+	}
+	SaveOne(&article)
+	article.favoriteBy(articleUserModel)
+
+	statusMap = BatchGetFavoriteStatus([]uint{article.ID}, 0)
+	asserts.Equal(0, len(statusMap), "Zero user ID should return empty map")
+
+	// Test with valid IDs
+	statusMap = BatchGetFavoriteStatus([]uint{article.ID}, articleUserModel.ID)
+	asserts.Equal(true, statusMap[article.ID], "Should return true for favorited article")
+}
+
+func TestSetTagsRaceCondition(t *testing.T) {
+	asserts := assert.New(t)
+
+	user := createTestUser()
+	articleUserModel := GetArticleUserModel(user)
+
+	article := ArticleModel{
+		Slug:        fmt.Sprintf("race-condition-article-%d", common.RandInt()),
+		Title:       "Race Condition Test",
+		Description: "Test Description",
+		Body:        "Test Body",
+		Author:      articleUserModel,
+		AuthorID:    articleUserModel.ID,
+	}
+
+	// Test setTags with duplicate tags
+	err := article.setTags([]string{"tag1", "tag2", "tag1"})
+	asserts.NoError(err, "setTags should handle duplicate tags")
+	// Should have 2 unique tags
+	asserts.Equal(3, len(article.Tags), "Should preserve all tags in list")
+}
+
+func TestArticleFeedWithEmptyFollowings(t *testing.T) {
+	asserts := assert.New(t)
+
+	user := createTestUser()
+	articleUserModel := GetArticleUserModel(user)
+
+	// Get feed with no followings
+	articles, count, err := articleUserModel.GetArticleFeed("10", "0")
+	asserts.NoError(err, "GetArticleFeed should succeed even with no followings")
+	asserts.Equal(0, count, "Count should be 0 with no followings")
+	asserts.NotNil(articles, "Articles should not be nil")
+}
+
+func TestArticleDeleteSuccess(t *testing.T) {
+	asserts := assert.New(t)
+
+	r := setupRouter()
+	user := createTestUser()
+
+	// Create an article
+	articleUserModel := GetArticleUserModel(user)
+	slug := fmt.Sprintf("delete-success-article-%d", common.RandInt())
+	article := ArticleModel{
+		Slug:        slug,
+		Title:       "Delete Success Test",
+		Description: "Test Description",
+		Body:        "Test Body",
+		Author:      articleUserModel,
+		AuthorID:    articleUserModel.ID,
+	}
+	SaveOne(&article)
+
+	// Test delete existing article
+	req, _ := http.NewRequest("DELETE", fmt.Sprintf("/api/articles/%s", slug), nil)
+	HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "Delete existing article should return 200")
+
+	// Verify article is deleted
+	foundArticle, err := FindOneArticle(&ArticleModel{Slug: slug})
+	asserts.Error(err, "Article should not be found after deletion")
+	asserts.Equal(uint(0), foundArticle.ID, "Article ID should be 0")
+}
+
+func TestTagListSuccess(t *testing.T) {
+	asserts := assert.New(t)
+
+	r := setupRouter()
+
+	// Create some test tags
+	tag1 := TagModel{Tag: fmt.Sprintf("listtag1-%d", common.RandInt())}
+	tag2 := TagModel{Tag: fmt.Sprintf("listtag2-%d", common.RandInt())}
+	test_db.Create(&tag1)
+	test_db.Create(&tag2)
+
+	// Test list tags endpoint
+	req, _ := http.NewRequest("GET", "/api/tags", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "Tags list should return 200")
+	asserts.Contains(w.Body.String(), `"tags"`, "Response should contain tags")
+}
+
+func TestArticleListErrorHandling(t *testing.T) {
+	asserts := assert.New(t)
+
+	r := setupRouter()
+
+	// Test with invalid limit/offset parameters
+	req, _ := http.NewRequest("GET", "/api/articles?limit=abc&offset=xyz", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "List with invalid params should still return 200")
+	asserts.Contains(w.Body.String(), `"articles"`, "Response should contain articles array")
+}
+
+func TestArticleFeedErrorPath(t *testing.T) {
+	asserts := assert.New(t)
+
+	r := setupRouter()
+	user := createTestUser()
+
+	// Test with invalid limit/offset
+	req, _ := http.NewRequest("GET", "/api/articles/feed?limit=invalid&offset=invalid", nil)
+	HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusOK, w.Code, "Feed with invalid params should return 200")
+	asserts.Contains(w.Body.String(), `"articles"`, "Response should contain articles")
+}
+
+func TestArticleCreateValidation(t *testing.T) {
+	asserts := assert.New(t)
+
+	r := setupRouter()
+	user := createTestUser()
+
+	// Test with empty fields
+	req, _ := http.NewRequest("POST", "/api/articles", bytes.NewBufferString(`{"article":{"title":"","description":"","body":""}}`))
+	req.Header.Set("Content-Type", "application/json")
+	HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusUnprocessableEntity, w.Code, "Empty fields should return 422")
+}
+
+func TestArticleUpdateNonExistent(t *testing.T) {
+	asserts := assert.New(t)
+
+	r := setupRouter()
+	user := createTestUser()
+
+	// Test update non-existent article
+	req, _ := http.NewRequest("PUT", "/api/articles/non-existent-article", bytes.NewBufferString(`{"article":{"title":"New Title"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	HeaderTokenMock(req, user.ID)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	asserts.Equal(http.StatusNotFound, w.Code, "Update non-existent article should return 404")
 }
 
 // This is a hack way to add test database for each case
