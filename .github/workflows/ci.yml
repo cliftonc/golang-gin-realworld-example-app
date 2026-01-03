@@ -13,6 +13,7 @@ jobs:
     
     permissions:
       contents: read
+      pull-requests: write
     
     strategy:
       matrix:
@@ -40,16 +41,14 @@ jobs:
       continue-on-error: true
       run: bash ./scripts/coverage.sh
     
-    - name: Upload coverage to Codecov
+    - name: Upload coverage to Coveralls
       if: matrix.go-version == '1.23'
-      uses: codecov/codecov-action@v5
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      uses: coverallsapp/github-action@v2
       with:
-        file: ./coverage.txt
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        file: ./coverage.out
+        format: golang
+        flag-name: go-${{ matrix.go-version }}
 
   lint:
     name: Lint
